@@ -19,6 +19,7 @@ class Jive_ruby_api
     self.instance_variables.each do |v|
       v_stripped = v.to_s.sub(/@/, '')
       if self.instance_variable_get("#{v}").nil? && config["#{v_stripped}"].nil?
+        #Will prompt if username or password is missing
         if "#{v}" == "@username" || "#{v}" == "@password"
           puts "WARN: #{v_stripped} not passed in or found from an environment variable"
           print "Enter #{v_stripped}: "
@@ -40,7 +41,10 @@ class Jive_ruby_api
     end
 
     @curl_get_prefix = "curl -s -u '#{@username}:#{@password}' -H 'Accept: application/json' -X GET "
-    @curl_put_prefix = "curl --trace-ascii trace  -u '#{@username}:#{@password}' -H 'Content-Type: application/json' -H 'Expect:' -X PUT "
+    @curl_put_prefix = "curl -v -u '#{@username}:#{@password}' -H 'Content-Type: application/json' -H 'Expect:' -X PUT "
+    @curl_post_prefix = "curl -s -u '#{@username}:#{@password}' -H 'Content-Type: application/json' -H 'Expect:' -X POST "
+    #@curl_post_prefix = "curl --trace-ascii trace -u '#{@username}:#{@password}' -H 'Content-Type: application/json' -H 'Expect:' -X POST "
+    #@curl_put_prefix = "curl --trace-ascii trace  -u '#{@username}:#{@password}' -H 'Content-Type: application/json' -H 'Expect:' -X PUT "
   end
 
   def build_config(config, value)
@@ -61,6 +65,7 @@ class Jive_ruby_api
 
 
 
+  #This strips the security string Jive implements with there GET requests
   def self.cleanse_security_string(security_string)
     return security_string.sub!("throw 'allowIllegalResourceCall is false.';", "")
   end
@@ -90,7 +95,6 @@ class Jive_ruby_api
   #Get people id by username
   def get_username_id(username)
     #puts "#{@curl} -X GET '#{@url}/people/username/#{username}'" if @debug
-    #This strips the security string Jive implements with there GET requests
     user_details = Jive_ruby_api.cleanse_security_string(`#{@curl_get_prefix} '#{@url}/people/username/#{username}'`)
 
     #Turn the string into a json object
@@ -108,12 +112,13 @@ class Jive_ruby_api
     #before
     #type
     #author
-    if search_parameters.class != Hash
+    if search_parameters.class != Hash || search_parameters['search_string'].nil?
       STDERR.puts "Error: find_content() requires Hash as argument"
       exit 2
     end
     #Required parameter
     search_string = "#{search_parameters['search_string']}"
+    #check/replace for spaces in string
     search_string.gsub!(/ /, "%20")
     #Optional paramters
     author = get_username_id("#{search_parameters['author']}")
@@ -121,12 +126,12 @@ class Jive_ruby_api
 
     type_filter = "&filter=type(#{search_parameters['type']})" unless search_parameters['type'].nil?
 
+    #Time is represented as 2014-12-11T00:00:000+0000
     after_filter = "&filter=after(#{search_parameters['after']})" unless search_parameters['after'].nil?
-    before_filter = "&filter=after(#{search_parameters['before']})" unless search_parameters['before'].nil?
-    #check/replace for spaces in string
+    before_filter = "&filter=before(#{search_parameters['before']})" unless search_parameters['before'].nil?
 
-    puts "find_content() #{@curl_get_prefix} '#{@url}/search/contents/?filter=search(#{search_string})#{author_filter}#{type_filter}&filter=after(2014-12-11T00:00:000+0000)'" if @debug
-    content_details = Jive_ruby_api.cleanse_security_string(`#{@curl_get_prefix} '#{@url}/search/contents/?filter=search(#{search_string})#{author_filter}&filter=type(document)&filter=after(2014-12-11T00:00:000+0000)'`)
+    puts "find_content() #{@curl_get_prefix} '#{@url}/search/contents/?filter=search(#{search_string})#{author_filter}#{type_filter}#{before_filter}#{after_filter}'" if @debug
+    content_details = Jive_ruby_api.cleanse_security_string(`#{@curl_get_prefix} '#{@url}/search/contents/?filter=search(#{search_string})#{author_filter}#{type_filter}#{before_filter}#{after_filter}'`)
     content_details = JSON.parse(content_details)
 
     array = Array.new
@@ -145,20 +150,58 @@ class Jive_ruby_api
     return time
   end
 
+  #Retreive html from a ref path like https://url.com/api/core/v3/contents/111111
   def get_content(content_ref_path)
     puts " get_content() #{@curl_get_prefix} #{content_ref_path}" if @debug
     content_details = Jive_ruby_api.cleanse_security_string(`#{@curl_get_prefix} #{content_ref_path}`)
     content_details = JSON.parse(content_details)
-    #puts JSON.pretty_generate(content_details['content'])
     html_string = content_details['content']['text']
 
     return html_string
 
   end
 
-  def update_content(content_ref_path, text)
+  def create_content(data)
+    #data should be a hash containing the following
+    ##required##
+    #text
+    #subject
+    #type
+    ##optional##
+    #parent
+    #username
+    #minor
+
+    #Build data object
+    data_object = {
+      'content' => {
+        'type' => 'text/html',
+        'text' => data['text'],
+      },
+      'subject' => data['subject'],
+      'parent' => data['parent'],
+      'type' => data['type']
+    }
+    puts " create_content() #{@curl_put_prefix} -d #{data_object} '#{@url}/contents?minor=true" if @debug
+    response = JSON.parse(`#{@curl_post_prefix} -d '#{data_object}' '#{@url}/contents?minor=true'`)
+
+    #Return null or html ref
+    return response['resources']['html']['ref']
+
+  end
+
+  def update_content(data)
+    #data should be a hash containing the following
+    #required
+    #content_ref_path
+    #text
+    #optional
+    #username
+    #minor
+
+  #def update_content(content_ref_path, text)
     puts "update_content() #{@curl_put_prefix} -d \"{ 'content': { 'type': 'text/html', 'text': '#{text}' }, 'subject': 'New Document', 'parent': '#{get_place('null')}', 'author': '#{get_username_id(@username)}' }\" '#{content_ref_path}?minor=true'" if @debug
-    text.gsub!(/\"/, "")
+    #text.gsub!(/\"/, "")
     #text.sub!(/\.<!--.*-->/, '')
     #puts text.inspect
     #puts "#{text}"
